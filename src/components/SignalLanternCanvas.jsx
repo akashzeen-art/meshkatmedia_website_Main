@@ -106,6 +106,8 @@ function buildFragments(lanternGroup, textures, mobile) {
     roughnessMap: textures.arm,
     roughness: 1.0,
     metalness: 0.0,
+    emissive: new THREE.Color(0xff4d00),
+    emissiveIntensity: 0,
     side: THREE.DoubleSide,
   })
 
@@ -158,7 +160,7 @@ function buildFragments(lanternGroup, textures, mobile) {
     const cellCenter = tmpC.clone()
     const cellNormal = tmpN.clone()
 
-    const SHRINK = 0.96
+    const SHRINK = 0.955
     for (let i = 0; i < pArr.length; i += 3) {
       pArr[i] = (pArr[i] - cx) * SHRINK
       pArr[i + 1] = (pArr[i + 1] - cy) * SHRINK
@@ -177,21 +179,24 @@ function buildFragments(lanternGroup, textures, mobile) {
     const aa = rnd[0] * TWO_PI
     const rotAxis = tang.clone().multiplyScalar(Math.cos(aa)).addScaledVector(bitang, Math.sin(aa)).normalize()
 
-    const mesh = new THREE.Mesh(geo, mat)
+    const fragMat = mat.clone()
+    const mesh = new THREE.Mesh(geo, fragMat)
     mesh.position.copy(cellCenter).addScaledVector(cellNormal, 0.015)
     mesh.userData = {
       cellCenter,
       cellNormal,
       rotAxis,
-      maxAngle: 0.7 + rnd[1] * 0.9,
+      maxAngle: 0.85 + rnd[1] * 1.1,
       lift: 0,
+      heat: rnd[0],
     }
     lanternGroup.add(mesh)
     list.push(mesh)
   }
 
   nonIndexed.dispose()
-  return { list, mat }
+  mat.dispose()
+  return { list }
 }
 
 /**
@@ -239,9 +244,9 @@ export default function SignalLanternCanvas({ sectionRef }) {
 
     const bloomPass = new UnrealBloomPass(
       new THREE.Vector2(1, 1),
-      mobile ? 0.55 : 0.7,
-      0.4,
-      0.65,
+      mobile ? 0.6 : 0.85,
+      0.45,
+      0.55,
     )
     composer.addPass(bloomPass)
 
@@ -304,7 +309,7 @@ export default function SignalLanternCanvas({ sectionRef }) {
     const core = new THREE.Mesh(addBarycentricCoords(coreGeo), wireMaterial)
     lanternGroup.add(core)
 
-    const { list: fragments, mat: fragMat } = buildFragments(
+    const { list: fragments } = buildFragments(
       lanternGroup,
       { diffuse, normal: normalTex, arm },
       mobile,
@@ -322,12 +327,13 @@ export default function SignalLanternCanvas({ sectionRef }) {
     const localHover = new THREE.Vector3()
 
     const fragParams = {
-      hoverRadius: mobile ? 0.95 : 0.75,
-      liftDist: 0.28,
-      liftSpeedUp: 0.15,
-      liftSpeedDown: 0.06,
+      hoverRadius: mobile ? 1.15 : 0.95,
+      liftDist: 0.48,
+      liftSpeedUp: 0.22,
+      liftSpeedDown: 0.07,
     }
 
+    const baseBloom = mobile ? 0.6 : 0.85
     let scrollP = 0
     let smoothP = 0
     let raf = 0
@@ -418,19 +424,38 @@ export default function SignalLanternCanvas({ sectionRef }) {
         hover.active = Math.max(hover.active - dt * 2.5, 0)
       }
 
+      let openGlow = 0
       for (const frag of fragments) {
-        const { cellCenter, cellNormal, rotAxis, maxAngle } = frag.userData
+        const { cellCenter, cellNormal, rotAxis, maxAngle, heat } = frag.userData
         let target = 0
         if (hover.active > 0.01) {
           const dist = cellCenter.distanceTo(hover.point)
-          target = (1 - smoothstep(0.4, fragParams.hoverRadius, dist)) * hover.active
+          target = (1 - smoothstep(0.25, fragParams.hoverRadius, dist)) * hover.active
         }
         const speed = target > frag.userData.lift ? fragParams.liftSpeedUp : fragParams.liftSpeedDown
         frag.userData.lift = THREE.MathUtils.lerp(frag.userData.lift, target, speed)
         const lift = frag.userData.lift
-        frag.position.copy(cellCenter).addScaledVector(cellNormal, 0.015 + lift * fragParams.liftDist)
+        openGlow = Math.max(openGlow, lift)
+
+        frag.position
+          .copy(cellCenter)
+          .addScaledVector(cellNormal, 0.015 + lift * fragParams.liftDist)
         frag.quaternion.setFromAxisAngle(rotAxis, lift * maxAngle)
+        frag.scale.setScalar(1 + lift * 0.08)
+
+        /* Bright glowing pieces when peeled open */
+        const glow = lift * lift
+        frag.material.emissive.setRGB(
+          1.0,
+          0.22 + heat * 0.2 + glow * 0.35,
+          0.02 + glow * 0.08,
+        )
+        frag.material.emissiveIntensity = glow * (2.8 + heat * 1.4)
+        frag.material.roughness = 1.0 - glow * 0.55
       }
+
+      bloomPass.strength = baseBloom + openGlow * 0.75
+      bloomPass.threshold = Math.max(0.2, 0.55 - openGlow * 0.25)
 
       composer.render()
     }
@@ -452,8 +477,10 @@ export default function SignalLanternCanvas({ sectionRef }) {
       window.removeEventListener('resize', updateScroll)
       window.removeEventListener('mousemove', onMove)
       window.removeEventListener('touchmove', onTouch)
-      fragments.forEach((m) => m.geometry.dispose())
-      fragMat.dispose()
+      fragments.forEach((m) => {
+        m.geometry.dispose()
+        m.material.dispose()
+      })
       core.geometry.dispose()
       wireMaterial.dispose()
       rcMesh.geometry.dispose()
