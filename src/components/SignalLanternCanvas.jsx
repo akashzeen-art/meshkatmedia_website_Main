@@ -1,16 +1,203 @@
 import { useEffect, useRef } from 'react'
+import * as THREE from 'three'
+import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js'
+import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js'
+import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js'
 
-function rand(min, max) {
-  return min + Math.random() * (max - min)
+const FRAG_SCALE = 32
+
+function hash2(px, py) {
+  const a = Math.sin(px * 127.1 + py * 311.7) * 43758.5453
+  const b = Math.sin(px * 269.5 + py * 183.3) * 43758.5453
+  return [a - Math.floor(a), b - Math.floor(b)]
 }
 
-function lerp(a, b, t) {
-  return a + (b - a) * t
+function cellSeed(u, v) {
+  const n = [Math.floor(u * FRAG_SCALE), Math.floor(v * FRAG_SCALE)]
+  const f = [u * FRAG_SCALE - n[0], v * FRAG_SCALE - n[1]]
+  let md = Infinity
+  let best = [...n]
+  for (let j = -2; j <= 2; j++) {
+    for (let i = -2; i <= 2; i++) {
+      const o = hash2(n[0] + i, n[1] + j)
+      const r = [i + o[0] - f[0], j + o[1] - f[1]]
+      const d = r[0] * r[0] + r[1] * r[1]
+      if (d < md) {
+        md = d
+        best = [n[0] + i + o[0], n[1] + j + o[1]]
+      }
+    }
+  }
+  return [best[0] / FRAG_SCALE, best[1] / FRAG_SCALE]
+}
+
+function addBarycentricCoords(geo) {
+  const g = geo.toNonIndexed()
+  const count = g.attributes.position.count
+  const bary = new Float32Array(count * 3)
+  for (let i = 0; i < count; i += 3) {
+    bary[i * 3] = 1
+    bary[i * 3 + 1] = 0
+    bary[i * 3 + 2] = 0
+    bary[(i + 1) * 3] = 0
+    bary[(i + 1) * 3 + 1] = 1
+    bary[(i + 1) * 3 + 2] = 0
+    bary[(i + 2) * 3] = 0
+    bary[(i + 2) * 3 + 1] = 0
+    bary[(i + 2) * 3 + 2] = 1
+  }
+  g.setAttribute('barycentric', new THREE.BufferAttribute(bary, 3))
+  return g
+}
+
+function smoothstep(min, max, v) {
+  const t = Math.max(0, Math.min(1, (v - min) / (max - min)))
+  return t * t * (3 - 2 * t)
+}
+
+/** Paper-lantern silhouette spun around Y (radius, height). */
+function createLanternGeometry(radial = 56, heightSeg = 72) {
+  const profile = [
+    new THREE.Vector2(0.02, 1.42),
+    new THREE.Vector2(0.18, 1.34),
+    new THREE.Vector2(0.38, 1.22),
+    new THREE.Vector2(0.52, 1.08),
+    new THREE.Vector2(0.68, 0.82),
+    new THREE.Vector2(0.78, 0.48),
+    new THREE.Vector2(0.8, 0.12),
+    new THREE.Vector2(0.76, -0.28),
+    new THREE.Vector2(0.64, -0.62),
+    new THREE.Vector2(0.46, -0.92),
+    new THREE.Vector2(0.28, -1.12),
+    new THREE.Vector2(0.12, -1.24),
+    new THREE.Vector2(0.04, -1.3),
+  ]
+  const geo = new THREE.LatheGeometry(profile, radial)
+  geo.computeVertexNormals()
+  return geo
+}
+
+function buildFragments(lanternGroup, mobile) {
+  const radial = mobile ? 40 : 56
+  const heightSeg = mobile ? 48 : 72
+  const baseGeo = createLanternGeometry(radial, heightSeg)
+  const nonIndexed = baseGeo.toNonIndexed()
+  baseGeo.dispose()
+
+  const pos = nonIndexed.attributes.position.array
+  const nrm = nonIndexed.attributes.normal.array
+  const uvData = nonIndexed.attributes.uv.array
+  const tris = pos.length / 9
+
+  const cellMap = new Map()
+  for (let t = 0; t < tris; t++) {
+    const uc = (uvData[t * 6] + uvData[t * 6 + 2] + uvData[t * 6 + 4]) / 3
+    const vc = (uvData[t * 6 + 1] + uvData[t * 6 + 3] + uvData[t * 6 + 5]) / 3
+    const s = cellSeed(uc, vc)
+    const k = `${s[0].toFixed(9)}_${s[1].toFixed(9)}`
+    if (!cellMap.has(k)) cellMap.set(k, { s, t: [] })
+    cellMap.get(k).t.push(t)
+  }
+
+  const mat = new THREE.MeshStandardMaterial({
+    color: new THREE.Color(0x3a2414),
+    roughness: 0.82,
+    metalness: 0.08,
+    emissive: new THREE.Color(0xff6a1a),
+    emissiveIntensity: 0.22,
+    side: THREE.DoubleSide,
+  })
+
+  const list = []
+  const TWO_PI = Math.PI * 2
+  const tmpN = new THREE.Vector3()
+  const tmpC = new THREE.Vector3()
+
+  for (const { s: seed, t: triList } of cellMap.values()) {
+    if (!triList.length) continue
+    const vc = triList.length * 3
+    const pArr = new Float32Array(vc * 3)
+    const nArr = new Float32Array(vc * 3)
+    const uvArr = new Float32Array(vc * 2)
+    let vi = 0
+    tmpC.set(0, 0, 0)
+    tmpN.set(0, 0, 0)
+
+    for (const tri of triList) {
+      for (let v = 0; v < 3; v++) {
+        const sv = tri * 3 + v
+        const px = pos[sv * 3]
+        const py = pos[sv * 3 + 1]
+        const pz = pos[sv * 3 + 2]
+        pArr[vi * 3] = px
+        pArr[vi * 3 + 1] = py
+        pArr[vi * 3 + 2] = pz
+        nArr[vi * 3] = nrm[sv * 3]
+        nArr[vi * 3 + 1] = nrm[sv * 3 + 1]
+        nArr[vi * 3 + 2] = nrm[sv * 3 + 2]
+        uvArr[vi * 2] = uvData[sv * 2]
+        uvArr[vi * 2 + 1] = uvData[sv * 2 + 1]
+        tmpC.x += px
+        tmpC.y += py
+        tmpC.z += pz
+        tmpN.x += nrm[sv * 3]
+        tmpN.y += nrm[sv * 3 + 1]
+        tmpN.z += nrm[sv * 3 + 2]
+        vi++
+      }
+    }
+
+    tmpC.multiplyScalar(1 / vc)
+    if (tmpN.lengthSq() < 1e-8) {
+      tmpN.set(tmpC.x, 0, tmpC.z)
+    }
+    tmpN.normalize()
+
+    const cx = tmpC.x
+    const cy = tmpC.y
+    const cz = tmpC.z
+    const cellCenter = tmpC.clone()
+    const cellNormal = tmpN.clone()
+
+    const SHRINK = 0.965
+    for (let i = 0; i < pArr.length; i += 3) {
+      pArr[i] = (pArr[i] - cx) * SHRINK
+      pArr[i + 1] = (pArr[i + 1] - cy) * SHRINK
+      pArr[i + 2] = (pArr[i + 2] - cz) * SHRINK
+    }
+
+    const geo = new THREE.BufferGeometry()
+    geo.setAttribute('position', new THREE.BufferAttribute(pArr, 3))
+    geo.setAttribute('normal', new THREE.BufferAttribute(nArr, 3))
+    geo.setAttribute('uv', new THREE.BufferAttribute(uvArr, 2))
+
+    const rnd = hash2(seed[0] * 137.53, seed[1] * 137.53)
+    const up = Math.abs(cellNormal.y) < 0.9 ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(1, 0, 0)
+    const tang = new THREE.Vector3().crossVectors(cellNormal, up).normalize()
+    const bitang = new THREE.Vector3().crossVectors(cellNormal, tang)
+    const aa = rnd[0] * TWO_PI
+    const rotAxis = tang.clone().multiplyScalar(Math.cos(aa)).addScaledVector(bitang, Math.sin(aa)).normalize()
+
+    const mesh = new THREE.Mesh(geo, mat)
+    mesh.position.copy(cellCenter).addScaledVector(cellNormal, 0.012)
+    mesh.userData = {
+      cellCenter,
+      cellNormal,
+      rotAxis,
+      maxAngle: 0.55 + rnd[1] * 0.85,
+      lift: 0,
+    }
+    lanternGroup.add(mesh)
+    list.push(mesh)
+  }
+
+  nonIndexed.dispose()
+  return { list, mat }
 }
 
 /**
- * Sticky night-sky lantern behind post-hero content.
- * Hover brightens the flame; scroll drifts the lantern through stages.
+ * Meshkat fracture lantern — Voronoi shell + luminous wireframe core.
+ * Hover peels fragments; scroll orbits through stages.
  */
 export default function SignalLanternCanvas({ sectionRef }) {
   const canvasRef = useRef(null)
@@ -23,57 +210,125 @@ export default function SignalLanternCanvas({ sectionRef }) {
 
     if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return undefined
 
-    const ctx = canvas.getContext('2d', { alpha: false })
-    if (!ctx) return undefined
-
     const mobile = window.matchMedia('(max-width: 768px), (pointer: coarse)').matches
 
-    let w = 0
-    let h = 0
-    const dpr = Math.min(window.devicePixelRatio || 1, mobile ? 1.25 : 2)
+    const scene = new THREE.Scene()
+    scene.background = new THREE.Color(0x07090d)
 
-    const stars = []
-    const sparks = []
-    const trail = []
-    const embers = []
+    const scrollGroup = new THREE.Group()
+    scene.add(scrollGroup)
+    const lanternGroup = new THREE.Group()
+    scrollGroup.add(lanternGroup)
+    scrollGroup.rotation.x = 0.12
+    scrollGroup.position.y = 0.15
+
+    const camera = new THREE.PerspectiveCamera(42, 1, 0.1, 100)
+    camera.position.z = 5.6
+
+    const renderer = new THREE.WebGLRenderer({
+      canvas,
+      antialias: !mobile,
+      powerPreference: 'high-performance',
+    })
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, mobile ? 1.25 : 1.75))
+    renderer.toneMapping = THREE.ACESFilmicToneMapping
+    renderer.toneMappingExposure = 1.05
+    renderer.outputColorSpace = THREE.SRGBColorSpace
+
+    const composer = new EffectComposer(renderer)
+    composer.addPass(new RenderPass(scene, camera))
+    const bloomPass = new UnrealBloomPass(
+      new THREE.Vector2(1, 1),
+      mobile ? 0.55 : 0.85,
+      0.42,
+      0.52,
+    )
+    composer.addPass(bloomPass)
+
+    scene.add(new THREE.AmbientLight(0xffe8d0, 0.32))
+    const key = new THREE.DirectionalLight(0xffd8b0, 2.2)
+    key.position.set(3.2, 4.2, 5)
+    scene.add(key)
+    const fill = new THREE.DirectionalLight(0x8899cc, 0.4)
+    fill.position.set(-4, -2, -3)
+    scene.add(fill)
+    const flame = new THREE.PointLight(0xff6a1a, 2.2, 10, 1.4)
+    flame.position.set(0, 0.15, 0)
+    lanternGroup.add(flame)
+
+    const wireMaterial = new THREE.ShaderMaterial({
+      vertexShader: `
+        attribute vec3 barycentric;
+        varying vec3 vBary;
+        void main() {
+          vBary = barycentric;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: `
+        varying vec3 vBary;
+        float wireMask(vec3 b, float t) {
+          vec3 d = fwidth(b);
+          vec3 a = smoothstep(vec3(0.0), d * t, b);
+          return 1.0 - min(a.x, min(a.y, a.z));
+        }
+        void main() {
+          float wf = wireMask(vBary, 1.55);
+          vec3 col = mix(vec3(0.06, 0.02, 0.0), vec3(1.0, 0.35, 0.06), wf);
+          col = mix(col, vec3(1.0, 0.75, 0.28) * 2.1, wf * 0.55);
+          gl_FragColor = vec4(col, 1.0);
+        }
+      `,
+      side: THREE.DoubleSide,
+    })
+
+    const coreGeo = createLanternGeometry(mobile ? 32 : 48, mobile ? 40 : 56)
+    coreGeo.scale(0.92, 0.92, 0.92)
+    const core = new THREE.Mesh(addBarycentricCoords(coreGeo), wireMaterial)
+    lanternGroup.add(core)
+
+    const glowMat = new THREE.MeshBasicMaterial({
+      color: 0xff8c28,
+      transparent: true,
+      opacity: 0.55,
+    })
+    const glow = new THREE.Mesh(new THREE.SphereGeometry(0.22, 24, 24), glowMat)
+    glow.position.y = 0.05
+    glow.scale.set(1, 1.35, 1)
+    lanternGroup.add(glow)
+
+    const { list: fragments, mat: fragMat } = buildFragments(lanternGroup, mobile)
+
+    const rcGeo = createLanternGeometry(mobile ? 24 : 36, mobile ? 32 : 48)
+    const rcMesh = new THREE.Mesh(rcGeo, new THREE.MeshBasicMaterial({ visible: false }))
+    lanternGroup.add(rcMesh)
+
+    const raycaster = new THREE.Raycaster()
+    const mouse = new THREE.Vector2(-999, -999)
+    const hover = { point: new THREE.Vector3(), active: 0 }
+    const localHover = new THREE.Vector3()
+
+    const params = {
+      hoverRadius: mobile ? 1.05 : 0.9,
+      liftDist: 0.34,
+      liftSpeedUp: 0.16,
+      liftSpeedDown: 0.055,
+    }
 
     let scrollP = 0
     let smoothP = 0
-    let flamePulse = 0
-    let hover = 0
-    let mouseX = 0.5
-    let mouseY = 0.5
-    let pointerIn = false
     let raf = 0
     let last = performance.now()
+    let idleY = 0
 
     const resize = () => {
-      w = Math.max(1, host.clientWidth)
-      h = Math.max(1, host.clientHeight)
-      canvas.width = Math.floor(w * dpr)
-      canvas.height = Math.floor(h * dpr)
-      canvas.style.width = `${w}px`
-      canvas.style.height = `${h}px`
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
-
-      if (stars.length === 0) {
-        const count = Math.floor((w * h) / (mobile ? 7000 : 4800))
-        for (let i = 0; i < count; i++) {
-          stars.push({
-            x: Math.random() * w,
-            y: Math.random() * h,
-            r: rand(0.35, 1.6),
-            a: rand(0.12, 0.75),
-            tw: rand(0.4, 2.2),
-            ph: Math.random() * Math.PI * 2,
-          })
-        }
-      } else {
-        for (const s of stars) {
-          s.x = (s.x / Math.max(w, 1)) * w || Math.random() * w
-          s.y = (s.y / Math.max(h, 1)) * h || Math.random() * h
-        }
-      }
+      const w = Math.max(1, host.clientWidth)
+      const h = Math.max(1, host.clientHeight)
+      camera.aspect = w / h
+      camera.updateProjectionMatrix()
+      renderer.setSize(w, h, false)
+      composer.setSize(w, h)
+      bloomPass.setSize(w, h)
     }
 
     const updateScroll = () => {
@@ -87,12 +342,11 @@ export default function SignalLanternCanvas({ sectionRef }) {
     const onMove = (e) => {
       const rect = host.getBoundingClientRect()
       if (e.clientY < rect.top || e.clientY > rect.bottom) {
-        pointerIn = false
+        mouse.set(-999, -999)
         return
       }
-      pointerIn = true
-      mouseX = (e.clientX - rect.left) / Math.max(rect.width, 1)
-      mouseY = (e.clientY - rect.top) / Math.max(rect.height, 1)
+      mouse.x = ((e.clientX - rect.left) / Math.max(rect.width, 1)) * 2 - 1
+      mouse.y = -((e.clientY - rect.top) / Math.max(rect.height, 1)) * 2 + 1
     }
 
     const onTouch = (e) => {
@@ -101,322 +355,75 @@ export default function SignalLanternCanvas({ sectionRef }) {
       onMove(t)
     }
 
-    const onLeave = () => {
-      pointerIn = false
-    }
-
-    const spawnSpark = (x, y, intensity) => {
-      const count = Math.floor(rand(1, 3) * intensity)
-      for (let i = 0; i < count; i++) {
-        sparks.push({
-          x: x + rand(-8, 8),
-          y: y + rand(0, 12),
-          vx: rand(-50, 50),
-          vy: rand(30, 140),
-          life: rand(0.3, 0.95),
-          age: 0,
-          size: rand(1, 3),
-          hue: rand(18, 48),
-        })
-      }
-    }
-
-    const spawnTrail = (x, y, intensity) => {
-      trail.push({
-        x: x + rand(-6, 6),
-        y: y + rand(4, 16),
-        vx: rand(-14, 14),
-        vy: rand(18, 70),
-        life: rand(0.45, 1.1),
-        age: 0,
-        size: rand(5, 14) * intensity,
-      })
-    }
-
-    const spawnEmber = (x, y) => {
-      embers.push({
-        x: x + rand(-10, 10),
-        y: y + rand(0, 16),
-        vx: rand(-16, 16),
-        vy: rand(24, 90),
-        life: rand(0.7, 1.8),
-        age: 0,
-        size: rand(0.7, 2),
-      })
-    }
-
-    const lanternLayout = (p, elapsed) => {
-      const stage = p * 2
-      let nx = 0.5
-      let ny = 0.48
-      let scale = Math.min(1.2, 0.88 + (w / 1400) * 0.28)
-
-      if (stage < 1) {
-        const t = stage
-        nx = lerp(0.5, 0.28, t)
-        ny = lerp(0.48, 0.42, t)
-        scale *= lerp(1, 0.92, t)
-      } else {
-        const t = stage - 1
-        nx = lerp(0.28, 0.72, t)
-        ny = lerp(0.42, 0.46, t)
-        scale *= lerp(0.92, 0.95, t)
-      }
-
-      const bob = Math.sin(elapsed * 0.0018) * 6
-      const sway = Math.sin(elapsed * 0.0014) * 0.035
-      return {
-        x: nx * w + Math.sin(elapsed * 0.0011) * 8,
-        y: ny * h + bob,
-        scale,
-        sway,
-      }
-    }
-
-    const drawSky = (elapsed) => {
-      const g = ctx.createLinearGradient(0, 0, 0, h)
-      g.addColorStop(0, '#05060c')
-      g.addColorStop(0.4, '#0a0c16')
-      g.addColorStop(0.75, '#10131f')
-      g.addColorStop(1, '#18121c')
-      ctx.fillStyle = g
-      ctx.fillRect(0, 0, w, h)
-
-      const hg = ctx.createRadialGradient(w * 0.5, h * 1.05, 0, w * 0.5, h * 1.05, w * 0.75)
-      hg.addColorStop(0, 'rgba(90, 42, 18, 0.2)')
-      hg.addColorStop(1, 'rgba(0, 0, 0, 0)')
-      ctx.fillStyle = hg
-      ctx.fillRect(0, 0, w, h)
-
-      for (const s of stars) {
-        const twinkle = 0.55 + 0.45 * Math.sin(elapsed * 0.001 * s.tw + s.ph)
-        ctx.beginPath()
-        ctx.fillStyle = `rgba(255, 236, 210, ${s.a * twinkle})`
-        ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2)
-        ctx.fill()
-      }
-    }
-
-    const drawParticles = () => {
-      for (const p of trail) {
-        const a = 1 - p.age / p.life
-        const rg = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, p.size)
-        rg.addColorStop(0, `rgba(255, 210, 120, ${0.5 * a})`)
-        rg.addColorStop(0.4, `rgba(255, 120, 40, ${0.3 * a})`)
-        rg.addColorStop(1, 'rgba(80, 20, 0, 0)')
-        ctx.fillStyle = rg
-        ctx.beginPath()
-        ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2)
-        ctx.fill()
-      }
-
-      for (const p of sparks) {
-        const a = 1 - p.age / p.life
-        ctx.beginPath()
-        ctx.fillStyle = `hsla(${p.hue}, 100%, ${55 + a * 25}%, ${a})`
-        ctx.arc(p.x, p.y, p.size * a, 0, Math.PI * 2)
-        ctx.fill()
-      }
-
-      for (const p of embers) {
-        const a = 1 - p.age / p.life
-        ctx.beginPath()
-        ctx.fillStyle = `rgba(255, ${140 + a * 80}, 60, ${a * 0.85})`
-        ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2)
-        ctx.fill()
-      }
-    }
-
-    const drawFlame = (intensity) => {
-      const flicker = 1 + Math.sin(flamePulse) * 0.08 + Math.sin(flamePulse * 2.3) * 0.05
-      const base = 20 * intensity * flicker
-      const plumeH = 48 * intensity * flicker
-      const plumeW = 16 * Math.min(intensity, 2.8)
-
-      const plume = ctx.createRadialGradient(0, 16, 2, 0, plumeH * 0.85, Math.max(55, 36 * intensity))
-      plume.addColorStop(0, `rgba(255, 250, 210, ${Math.min(1, 0.8 * intensity)})`)
-      plume.addColorStop(0.25, `rgba(255, 180, 60, ${Math.min(1, 0.5 * intensity)})`)
-      plume.addColorStop(0.6, `rgba(255, 80, 20, ${Math.min(0.85, 0.25 * intensity)})`)
-      plume.addColorStop(1, 'rgba(40, 10, 0, 0)')
-      ctx.fillStyle = plume
-      ctx.beginPath()
-      ctx.ellipse(0, plumeH * 0.65, plumeW, plumeH, 0, 0, Math.PI * 2)
-      ctx.fill()
-
-      for (let i = 0; i < 3; i++) {
-        const ox = Math.sin(flamePulse * 1.5 + i) * (3 + i)
-        const oy = 12 + i * 9
-        const rg = ctx.createRadialGradient(ox, oy, 0, ox, oy, base * (1 - i * 0.2))
-        rg.addColorStop(0, `rgba(255, 245, 200, ${Math.min(1, 0.88 - i * 0.2)})`)
-        rg.addColorStop(0.45, `rgba(255, 150, 40, ${Math.min(1, 0.5 - i * 0.1)})`)
-        rg.addColorStop(1, 'rgba(180, 40, 0, 0)')
-        ctx.fillStyle = rg
-        ctx.beginPath()
-        ctx.arc(ox, oy, base * (1 - i * 0.15), 0, Math.PI * 2)
-        ctx.fill()
-      }
-    }
-
-    const drawLantern = (layout, intensity) => {
-      const { x, y, scale, sway } = layout
-
-      ctx.save()
-      ctx.translate(x, y)
-      ctx.rotate(sway)
-      ctx.scale(scale, scale)
-
-      const bloom = ctx.createRadialGradient(0, 12, 4, 0, 18, 150 + hover * 40)
-      bloom.addColorStop(0, `rgba(255, 170, 60, ${Math.min(0.8, 0.32 * intensity)})`)
-      bloom.addColorStop(0.45, `rgba(200, 90, 20, ${Math.min(0.45, 0.11 * intensity)})`)
-      bloom.addColorStop(1, 'rgba(0, 0, 0, 0)')
-      ctx.fillStyle = bloom
-      ctx.beginPath()
-      ctx.arc(0, 18, 150 + hover * 30, 0, Math.PI * 2)
-      ctx.fill()
-
-      drawFlame(intensity)
-
-      ctx.fillStyle = '#2a1c12'
-      ctx.beginPath()
-      ctx.moveTo(-22, -38)
-      ctx.quadraticCurveTo(0, -52, 22, -38)
-      ctx.lineTo(18, -32)
-      ctx.quadraticCurveTo(0, -42, -18, -32)
-      ctx.closePath()
-      ctx.fill()
-
-      ctx.strokeStyle = '#c89a4a'
-      ctx.lineWidth = 2
-      ctx.beginPath()
-      ctx.ellipse(0, -32, 20, 4, 0, 0, Math.PI * 2)
-      ctx.stroke()
-
-      const body = ctx.createLinearGradient(-28, -30, 28, 40)
-      body.addColorStop(0, '#5a3018')
-      body.addColorStop(0.35, `rgba(255, ${140 + intensity * 40}, 50, 0.95)`)
-      body.addColorStop(0.55, `rgba(255, 200, 110, ${0.72 + intensity * 0.2})`)
-      body.addColorStop(0.75, `rgba(255, ${120 + intensity * 50}, 40, 0.9)`)
-      body.addColorStop(1, '#3a1a0c')
-      ctx.fillStyle = body
-      ctx.beginPath()
-      ctx.moveTo(-26, -30)
-      ctx.quadraticCurveTo(-32, 5, -24, 38)
-      ctx.quadraticCurveTo(0, 46, 24, 38)
-      ctx.quadraticCurveTo(32, 5, 26, -30)
-      ctx.quadraticCurveTo(0, -38, -26, -30)
-      ctx.closePath()
-      ctx.fill()
-
-      const inner = ctx.createRadialGradient(0, 8, 2, 0, 10, 36)
-      inner.addColorStop(0, `rgba(255, 240, 180, ${0.5 * intensity})`)
-      inner.addColorStop(0.5, `rgba(255, 140, 40, ${0.22 * intensity})`)
-      inner.addColorStop(1, 'rgba(0, 0, 0, 0)')
-      ctx.fillStyle = inner
-      ctx.beginPath()
-      ctx.ellipse(0, 8, 18, 28, 0, 0, Math.PI * 2)
-      ctx.fill()
-
-      ctx.strokeStyle = 'rgba(90, 50, 20, 0.55)'
-      ctx.lineWidth = 1.2
-      ;[-14, 0, 14].forEach((rx) => {
-        ctx.beginPath()
-        ctx.moveTo(rx * 0.85, -30)
-        ctx.quadraticCurveTo(rx, 5, rx * 0.75, 38)
-        ctx.stroke()
-      })
-      ctx.beginPath()
-      ctx.ellipse(0, 4, 27, 6, 0, 0, Math.PI * 2)
-      ctx.stroke()
-
-      ctx.strokeStyle = '#b8893f'
-      ctx.lineWidth = 2
-      ctx.beginPath()
-      ctx.ellipse(0, 38, 24, 5, 0, 0, Math.PI * 2)
-      ctx.stroke()
-
-      ctx.strokeStyle = '#8a6a3a'
-      ctx.lineWidth = 1
-      ctx.beginPath()
-      ctx.moveTo(0, 42)
-      ctx.lineTo(0, 52)
-      ctx.stroke()
-
-      ctx.restore()
-    }
-
-    const drawVignette = () => {
-      const vg = ctx.createRadialGradient(w * 0.5, h * 0.45, h * 0.18, w * 0.5, h * 0.5, h * 0.9)
-      vg.addColorStop(0, 'rgba(0,0,0,0)')
-      vg.addColorStop(1, 'rgba(0,0,0,0.5)')
-      ctx.fillStyle = vg
-      ctx.fillRect(0, 0, w, h)
-    }
-
     const tick = (now) => {
       raf = requestAnimationFrame(tick)
       const dt = Math.min((now - last) / 1000, 0.05)
       last = now
-      const elapsed = now
 
       smoothP += (scrollP - smoothP) * (1 - Math.exp(-dt * 3.2))
-      flamePulse += dt * 14
 
-      const layout = lanternLayout(smoothP, elapsed)
+      const p = smoothP
+      const stage = p * 2
+      let px = 0
+      let py = 0.15
+      let rx = 0.12
+      let ry = 0
+      let rz = 0
+      if (stage < 1) {
+        const t = stage
+        px = THREE.MathUtils.lerp(0, -2.0, t)
+        py = THREE.MathUtils.lerp(0.15, 0.05, t)
+        rx = THREE.MathUtils.lerp(0.12, Math.PI * 0.28, t)
+        ry = THREE.MathUtils.lerp(0, -Math.PI * 0.45, t)
+        rz = THREE.MathUtils.lerp(0, Math.PI * 0.12, t)
+      } else {
+        const t = stage - 1
+        px = THREE.MathUtils.lerp(-2.0, 2.0, t)
+        py = THREE.MathUtils.lerp(0.05, 0.1, t)
+        rx = THREE.MathUtils.lerp(Math.PI * 0.28, -Math.PI * 0.22, t)
+        ry = THREE.MathUtils.lerp(-Math.PI * 0.45, Math.PI * 0.45, t)
+        rz = THREE.MathUtils.lerp(Math.PI * 0.12, -Math.PI * 0.12, t)
+      }
+      scrollGroup.position.set(px, py, 0)
+      scrollGroup.rotation.set(rx, ry, rz)
 
-      const dx = mouseX * w - layout.x
-      const dy = mouseY * h - layout.y
-      const dist = Math.hypot(dx, dy)
-      const near = Math.max(0, 1 - dist / (Math.min(w, h) * 0.32))
-      const targetHover = pointerIn ? near : 0
-      hover += (targetHover - hover) * (1 - Math.exp(-dt * 6))
+      if (smoothP < 0.03) idleY += dt * 0.32
+      lanternGroup.rotation.y = idleY
 
-      const intensity = 0.72 + Math.sin(flamePulse) * 0.08 + hover * 0.85
-
-      if (Math.random() < 0.35 + hover * 0.55) {
-        spawnSpark(layout.x, layout.y + 26 * layout.scale, intensity * (0.6 + hover))
-      }
-      if (hover > 0.15 && Math.random() < hover * 0.7) {
-        spawnTrail(layout.x, layout.y + 30 * layout.scale, 0.7 + hover)
-      }
-      if (Math.random() < 0.25 + hover * 0.45) {
-        spawnEmber(layout.x, layout.y + 22 * layout.scale)
-      }
-
-      for (let i = sparks.length - 1; i >= 0; i--) {
-        const p = sparks[i]
-        p.age += dt
-        p.x += p.vx * dt
-        p.y += p.vy * dt
-        p.vy += 35 * dt
-        p.vx *= 0.985
-        if (p.age >= p.life) sparks.splice(i, 1)
-      }
-      for (let i = trail.length - 1; i >= 0; i--) {
-        const p = trail[i]
-        p.age += dt
-        p.x += p.vx * dt
-        p.y += p.vy * dt
-        p.vy += 22 * dt
-        p.size *= 0.992
-        if (p.age >= p.life) trail.splice(i, 1)
-      }
-      for (let i = embers.length - 1; i >= 0; i--) {
-        const p = embers[i]
-        p.age += dt
-        p.x += p.vx * dt
-        p.y += p.vy * dt
-        p.vy += 18 * dt
-        if (p.age >= p.life) embers.splice(i, 1)
+      raycaster.setFromCamera(mouse, camera)
+      const hits = raycaster.intersectObject(rcMesh)
+      if (hits.length > 0) {
+        lanternGroup.worldToLocal(localHover.copy(hits[0].point))
+        hover.point.copy(localHover)
+        hover.active = Math.min(hover.active + dt * 5, 1)
+      } else {
+        hover.active = Math.max(hover.active - dt * 2.4, 0)
       }
 
-      while (sparks.length > 120) sparks.shift()
-      while (trail.length > 40) trail.shift()
-      while (embers.length > 60) embers.shift()
+      for (const frag of fragments) {
+        const { cellCenter, cellNormal, rotAxis, maxAngle } = frag.userData
+        let target = 0
+        if (hover.active > 0.01) {
+          const dist = cellCenter.distanceTo(hover.point)
+          target = (1 - smoothstep(0.35, params.hoverRadius, dist)) * hover.active
+        }
+        const speed = target > frag.userData.lift ? params.liftSpeedUp : params.liftSpeedDown
+        frag.userData.lift = THREE.MathUtils.lerp(
+          frag.userData.lift,
+          target,
+          1 - Math.exp(-speed * 60 * dt),
+        )
+        const lift = frag.userData.lift
+        frag.position.copy(cellCenter).addScaledVector(cellNormal, 0.012 + lift * params.liftDist)
+        frag.quaternion.setFromAxisAngle(rotAxis, lift * maxAngle)
+      }
 
-      drawSky(elapsed)
-      drawParticles()
-      drawLantern(layout, intensity)
-      drawVignette()
+      flame.intensity = 1.8 + hover.active * 1.4 + Math.sin(now * 0.003) * 0.25
+      glowMat.opacity = 0.4 + hover.active * 0.35 + Math.sin(now * 0.004) * 0.08
+      glow.scale.setScalar(1 + hover.active * 0.25 + Math.sin(now * 0.0035) * 0.06)
+      glow.scale.y = glow.scale.x * 1.35
+
+      composer.render()
     }
 
     resize()
@@ -427,7 +434,6 @@ export default function SignalLanternCanvas({ sectionRef }) {
     window.addEventListener('resize', updateScroll, { passive: true })
     window.addEventListener('mousemove', onMove, { passive: true })
     window.addEventListener('touchmove', onTouch, { passive: true })
-    window.addEventListener('mouseleave', onLeave)
     raf = requestAnimationFrame(tick)
 
     return () => {
@@ -437,13 +443,22 @@ export default function SignalLanternCanvas({ sectionRef }) {
       window.removeEventListener('resize', updateScroll)
       window.removeEventListener('mousemove', onMove)
       window.removeEventListener('touchmove', onTouch)
-      window.removeEventListener('mouseleave', onLeave)
+      fragments.forEach((m) => m.geometry.dispose())
+      fragMat.dispose()
+      core.geometry.dispose()
+      wireMaterial.dispose()
+      glow.geometry.dispose()
+      glowMat.dispose()
+      rcMesh.geometry.dispose()
+      rcMesh.material.dispose()
+      composer.dispose()
+      renderer.dispose()
     }
   }, [sectionRef])
 
   return (
     <div className="signal-canvas-host" ref={hostRef} aria-hidden="true">
-      <canvas ref={canvasRef} className="signal-webgl signal-lantern-canvas" />
+      <canvas ref={canvasRef} className="signal-webgl" />
       <div className="signal-scanlines" />
     </div>
   )

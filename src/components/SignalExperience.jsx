@@ -46,7 +46,7 @@ const stages = [
         to scale.
       </>
     ),
-    body: 'Hover the lantern to feed the flame and release sparks. Scroll to drift through Meshkat’s world — connect, create, grow.',
+    body: 'Hover the lantern to peel the shell and reveal the luminous wireframe within. Scroll to orbit through Meshkat’s world — connect, create, grow.',
     features: [
       'Telecom platforms · VAS · messaging',
       '360° digital & social marketing',
@@ -109,7 +109,7 @@ export default function SignalExperience({ children }) {
           <div className="signal-hud-corner signal-hud-tl" />
           <div className="signal-hud-corner signal-hud-br" />
           <p className={`signal-hint${showHint ? ' is-visible' : ''}`}>
-            ↑ hover the lantern to feed the flame ↑
+            ↑ hover the lantern to break it open ↑
           </p>
           <div className="signal-stage-dots">
             {stages.map((s, i) => (
