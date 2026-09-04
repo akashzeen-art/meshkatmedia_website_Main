@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import SignalRingCanvas from './SignalRingCanvas.jsx'
+import SignalLanternCanvas from './SignalLanternCanvas.jsx'
 import Reveal from './Reveal.jsx'
 
 const stages = [
@@ -14,7 +14,7 @@ const stages = [
         never sleep.
       </>
     ),
-    body: 'End-to-end telecom platforms, messaging, and carrier partnerships — a living ring of connections across 18 countries.',
+    body: 'End-to-end telecom platforms, messaging, and carrier partnerships — a living lantern of connections across 18 countries.',
     stats: [
       { n: '18', l: 'Countries' },
       { n: '25+', l: 'Years' },
@@ -46,7 +46,7 @@ const stages = [
         to scale.
       </>
     ),
-    body: 'Hover the ring to peel the shell and reveal the luminous core. Scroll to orbit through Meshkat’s world — connect, create, grow.',
+    body: 'Hover the lantern to feed the flame and release sparks. Scroll to drift through Meshkat’s world — connect, create, grow.',
     features: [
       'Telecom platforms · VAS · messaging',
       '360° digital & social marketing',
@@ -57,7 +57,7 @@ const stages = [
 ]
 
 /**
- * Sticky signal-ring backdrop from after hero through the rest of the page.
+ * Sticky lantern backdrop from after hero through the rest of the page.
  * Pass remaining homepage sections as children.
  */
 export default function SignalExperience({ children }) {
@@ -102,14 +102,14 @@ export default function SignalExperience({ children }) {
   }, [])
 
   return (
-    <section className="signal-experience" ref={sectionRef} aria-label="Signal experience">
+    <section className="signal-experience" ref={sectionRef} aria-label="Lantern experience">
       <div className="signal-sticky">
-        <SignalRingCanvas sectionRef={sectionRef} />
+        <SignalLanternCanvas sectionRef={sectionRef} />
         <div className="signal-hud" aria-hidden="true">
           <div className="signal-hud-corner signal-hud-tl" />
           <div className="signal-hud-corner signal-hud-br" />
           <p className={`signal-hint${showHint ? ' is-visible' : ''}`}>
-            ↑ hover the ring to open the network ↑
+            ↑ hover the lantern to feed the flame ↑
           </p>
           <div className="signal-stage-dots">
             {stages.map((s, i) => (

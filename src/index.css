@@ -1374,7 +1374,7 @@ a.artist-name:hover {
   }
 }
 
-/* ---------- Signal experience (post-hero WebGL) ---------- */
+/* ---------- Signal experience (post-hero lantern) ---------- */
 .signal-experience {
   position: relative;
   background: transparent;
@@ -1401,7 +1401,8 @@ a.artist-name:hover {
   pointer-events: auto;
 }
 
-.signal-webgl {
+.signal-webgl,
+.signal-lantern-canvas {
   display: block;
   width: 100%;
   height: 100%;
