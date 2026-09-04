@@ -21,3 +21,8 @@ Thumbs.db
 .vscode/
 *.swp
 *.swo
+node_modules/
+dist/
+.env
+.env.*
+.DS_Store
