@@ -3,8 +3,10 @@ import * as THREE from 'three'
 import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js'
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js'
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js'
+import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js'
+import { FXAAShader } from 'three/examples/jsm/shaders/FXAAShader.js'
 
-const FRAG_SCALE = 32
+const FRAG_SCALE = 42
 
 function hash2(px, py) {
   const a = Math.sin(px * 127.1 + py * 311.7) * 43758.5453
@@ -55,32 +57,31 @@ function smoothstep(min, max, v) {
   return t * t * (3 - 2 * t)
 }
 
-/** Paper-lantern silhouette spun around Y (radius, height). */
-function createLanternGeometry(radial = 56, heightSeg = 72) {
+/** Paper-lantern silhouette (radius, height) — same fracture format as the donut demo. */
+function createLanternGeometry(radial = 72) {
   const profile = [
-    new THREE.Vector2(0.02, 1.42),
-    new THREE.Vector2(0.18, 1.34),
-    new THREE.Vector2(0.38, 1.22),
-    new THREE.Vector2(0.52, 1.08),
-    new THREE.Vector2(0.68, 0.82),
-    new THREE.Vector2(0.78, 0.48),
-    new THREE.Vector2(0.8, 0.12),
-    new THREE.Vector2(0.76, -0.28),
-    new THREE.Vector2(0.64, -0.62),
-    new THREE.Vector2(0.46, -0.92),
-    new THREE.Vector2(0.28, -1.12),
-    new THREE.Vector2(0.12, -1.24),
-    new THREE.Vector2(0.04, -1.3),
+    new THREE.Vector2(0.02, 1.55),
+    new THREE.Vector2(0.22, 1.45),
+    new THREE.Vector2(0.42, 1.3),
+    new THREE.Vector2(0.58, 1.1),
+    new THREE.Vector2(0.74, 0.78),
+    new THREE.Vector2(0.86, 0.4),
+    new THREE.Vector2(0.9, 0.0),
+    new THREE.Vector2(0.86, -0.4),
+    new THREE.Vector2(0.72, -0.78),
+    new THREE.Vector2(0.52, -1.1),
+    new THREE.Vector2(0.32, -1.32),
+    new THREE.Vector2(0.14, -1.45),
+    new THREE.Vector2(0.03, -1.52),
   ]
   const geo = new THREE.LatheGeometry(profile, radial)
   geo.computeVertexNormals()
   return geo
 }
 
-function buildFragments(lanternGroup, mobile) {
-  const radial = mobile ? 40 : 56
-  const heightSeg = mobile ? 48 : 72
-  const baseGeo = createLanternGeometry(radial, heightSeg)
+function buildFragments(lanternGroup, textures, mobile) {
+  const radial = mobile ? 48 : 80
+  const baseGeo = createLanternGeometry(radial)
   const nonIndexed = baseGeo.toNonIndexed()
   baseGeo.dispose()
 
@@ -100,11 +101,11 @@ function buildFragments(lanternGroup, mobile) {
   }
 
   const mat = new THREE.MeshStandardMaterial({
-    color: new THREE.Color(0xc45a18),
-    roughness: 0.55,
-    metalness: 0.05,
-    emissive: new THREE.Color(0xff7a1a),
-    emissiveIntensity: 1.15,
+    map: textures.diffuse,
+    normalMap: textures.normal,
+    roughnessMap: textures.arm,
+    roughness: 1.0,
+    metalness: 0.0,
     side: THREE.DoubleSide,
   })
 
@@ -148,9 +149,7 @@ function buildFragments(lanternGroup, mobile) {
     }
 
     tmpC.multiplyScalar(1 / vc)
-    if (tmpN.lengthSq() < 1e-8) {
-      tmpN.set(tmpC.x, 0, tmpC.z)
-    }
+    if (tmpN.lengthSq() < 1e-8) tmpN.set(tmpC.x, 0, tmpC.z)
     tmpN.normalize()
 
     const cx = tmpC.x
@@ -159,7 +158,7 @@ function buildFragments(lanternGroup, mobile) {
     const cellCenter = tmpC.clone()
     const cellNormal = tmpN.clone()
 
-    const SHRINK = 0.965
+    const SHRINK = 0.96
     for (let i = 0; i < pArr.length; i += 3) {
       pArr[i] = (pArr[i] - cx) * SHRINK
       pArr[i + 1] = (pArr[i + 1] - cy) * SHRINK
@@ -179,12 +178,12 @@ function buildFragments(lanternGroup, mobile) {
     const rotAxis = tang.clone().multiplyScalar(Math.cos(aa)).addScaledVector(bitang, Math.sin(aa)).normalize()
 
     const mesh = new THREE.Mesh(geo, mat)
-    mesh.position.copy(cellCenter).addScaledVector(cellNormal, 0.012)
+    mesh.position.copy(cellCenter).addScaledVector(cellNormal, 0.015)
     mesh.userData = {
       cellCenter,
       cellNormal,
       rotAxis,
-      maxAngle: 0.55 + rnd[1] * 0.85,
+      maxAngle: 0.7 + rnd[1] * 0.9,
       lift: 0,
     }
     lanternGroup.add(mesh)
@@ -196,8 +195,8 @@ function buildFragments(lanternGroup, mobile) {
 }
 
 /**
- * Meshkat fracture lantern — Voronoi shell + luminous wireframe core.
- * Hover peels fragments; scroll orbits through stages.
+ * Fracture lantern in Digital-Donut format:
+ * PBR stone shell · barycentric fire wireframe · UnrealBloom · hover peel.
  */
 export default function SignalLanternCanvas({ sectionRef }) {
   const canvasRef = useRef(null)
@@ -213,54 +212,69 @@ export default function SignalLanternCanvas({ sectionRef }) {
     const mobile = window.matchMedia('(max-width: 768px), (pointer: coarse)').matches
 
     const scene = new THREE.Scene()
-    scene.background = new THREE.Color(0x07090d)
+    scene.background = new THREE.Color(0x080808)
 
     const scrollGroup = new THREE.Group()
     scene.add(scrollGroup)
     const lanternGroup = new THREE.Group()
     scrollGroup.add(lanternGroup)
-    scrollGroup.rotation.x = 0.12
-    scrollGroup.position.y = 0.15
+    scrollGroup.rotation.x = 0.15
+    scrollGroup.position.y = 0.1
 
-    const camera = new THREE.PerspectiveCamera(42, 1, 0.1, 100)
-    camera.position.z = 5.6
+    const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 1000)
+    camera.position.z = 6.2
 
     const renderer = new THREE.WebGLRenderer({
       canvas,
       antialias: !mobile,
       powerPreference: 'high-performance',
     })
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, mobile ? 1.25 : 1.75))
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, mobile ? 1.25 : 2))
     renderer.toneMapping = THREE.ACESFilmicToneMapping
-    renderer.toneMappingExposure = 1.25
+    renderer.toneMappingExposure = 1.0
     renderer.outputColorSpace = THREE.SRGBColorSpace
 
     const composer = new EffectComposer(renderer)
     composer.addPass(new RenderPass(scene, camera))
+
     const bloomPass = new UnrealBloomPass(
       new THREE.Vector2(1, 1),
-      mobile ? 1.15 : 1.65,
-      0.85,
-      0.12,
+      mobile ? 0.55 : 0.7,
+      0.4,
+      0.65,
     )
     composer.addPass(bloomPass)
 
-    scene.add(new THREE.AmbientLight(0xffc891, 0.22))
-    const key = new THREE.DirectionalLight(0xffe0b8, 1.4)
-    key.position.set(3.2, 4.2, 5)
-    scene.add(key)
-    const fill = new THREE.DirectionalLight(0x6a7a99, 0.25)
-    fill.position.set(-4, -2, -3)
-    scene.add(fill)
-    const flame = new THREE.PointLight(0xff7a1a, 4.5, 14, 1.1)
-    flame.position.set(0, 0.1, 0)
-    lanternGroup.add(flame)
-    const flameSoft = new THREE.PointLight(0xffc060, 2.2, 8, 1.6)
-    flameSoft.position.set(0, -0.15, 0)
-    lanternGroup.add(flameSoft)
+    const fxaaPass = new ShaderPass(FXAAShader)
+    fxaaPass.uniforms.resolution.value.set(1, 1)
+    composer.addPass(fxaaPass)
+
+    scene.add(new THREE.AmbientLight(0xffffff, 0.35))
+    const dirLight = new THREE.DirectionalLight(0xfff4e0, 2.8)
+    dirLight.position.set(3, 4, 5)
+    scene.add(dirLight)
+    const fillLight = new THREE.DirectionalLight(0xaabbff, 0.5)
+    fillLight.position.set(-4, -2, -3)
+    scene.add(fillLight)
+
+    const textureLoader = new THREE.TextureLoader()
+    const diffuse = textureLoader.load(
+      'https://raw.githubusercontent.com/danielyl123/person/refs/heads/main/diffuse.jpg',
+    )
+    const normalTex = textureLoader.load(
+      'https://raw.githubusercontent.com/danielyl123/person/refs/heads/main/normal.jpg',
+    )
+    const arm = textureLoader.load(
+      'https://raw.githubusercontent.com/danielyl123/person/refs/heads/main/arm.jpg',
+    )
+    ;[diffuse, normalTex, arm].forEach((tex) => {
+      tex.repeat.set(2, 2)
+      tex.wrapS = tex.wrapT = THREE.RepeatWrapping
+    })
+    diffuse.colorSpace = THREE.SRGBColorSpace
 
     const wireMaterial = new THREE.ShaderMaterial({
-      vertexShader: `
+      vertexShader: /* glsl */ `
         attribute vec3 barycentric;
         varying vec3 vBary;
         void main() {
@@ -268,7 +282,7 @@ export default function SignalLanternCanvas({ sectionRef }) {
           gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
         }
       `,
-      fragmentShader: `
+      fragmentShader: /* glsl */ `
         varying vec3 vBary;
         float wireMask(vec3 b, float t) {
           vec3 d = fwidth(b);
@@ -276,63 +290,30 @@ export default function SignalLanternCanvas({ sectionRef }) {
           return 1.0 - min(a.x, min(a.y, a.z));
         }
         void main() {
-          float wf = wireMask(vBary, 1.35);
-          vec3 base = vec3(0.18, 0.04, 0.0);
-          vec3 edge = vec3(1.4, 0.45, 0.08);
-          vec3 hot = vec3(2.4, 1.35, 0.35);
-          vec3 col = mix(base, edge, wf);
-          col = mix(col, hot, wf * 0.7);
+          float wf = wireMask(vBary, 1.6);
+          vec3 col = mix(vec3(0.07, 0.01, 0.0), vec3(1.0, 0.28, 0.04), wf);
+          col = mix(col, vec3(1.0, 0.8, 0.3) * 2.2, wf * 0.55);
           gl_FragColor = vec4(col, 1.0);
         }
       `,
       side: THREE.DoubleSide,
     })
 
-    const coreGeo = createLanternGeometry(mobile ? 32 : 48, mobile ? 40 : 56)
-    coreGeo.scale(0.92, 0.92, 0.92)
+    const coreGeo = createLanternGeometry(mobile ? 48 : 72)
+    coreGeo.scale(0.94, 0.94, 0.94)
     const core = new THREE.Mesh(addBarycentricCoords(coreGeo), wireMaterial)
     lanternGroup.add(core)
 
-    const glowMat = new THREE.MeshBasicMaterial({
-      color: 0xffb040,
-      transparent: true,
-      opacity: 0.95,
-      blending: THREE.AdditiveBlending,
-      depthWrite: false,
-    })
-    const glow = new THREE.Mesh(new THREE.SphereGeometry(0.28, 28, 28), glowMat)
-    glow.position.y = 0.05
-    glow.scale.set(1, 1.45, 1)
-    lanternGroup.add(glow)
+    const { list: fragments, mat: fragMat } = buildFragments(
+      lanternGroup,
+      { diffuse, normal: normalTex, arm },
+      mobile,
+    )
 
-    const haloMat = new THREE.MeshBasicMaterial({
-      color: 0xff6a14,
-      transparent: true,
-      opacity: 0.28,
-      blending: THREE.AdditiveBlending,
-      depthWrite: false,
-      side: THREE.DoubleSide,
-    })
-    const halo = new THREE.Mesh(new THREE.SphereGeometry(1.05, 32, 32), haloMat)
-    halo.scale.set(0.85, 1.15, 0.85)
-    lanternGroup.add(halo)
-
-    const auraMat = new THREE.MeshBasicMaterial({
-      color: 0xff8c28,
-      transparent: true,
-      opacity: 0.14,
-      blending: THREE.AdditiveBlending,
-      depthWrite: false,
-      side: THREE.DoubleSide,
-    })
-    const aura = new THREE.Mesh(new THREE.SphereGeometry(1.65, 32, 32), auraMat)
-    aura.scale.set(0.9, 1.2, 0.9)
-    lanternGroup.add(aura)
-
-    const { list: fragments, mat: fragMat } = buildFragments(lanternGroup, mobile)
-
-    const rcGeo = createLanternGeometry(mobile ? 24 : 36, mobile ? 32 : 48)
-    const rcMesh = new THREE.Mesh(rcGeo, new THREE.MeshBasicMaterial({ visible: false }))
+    const rcMesh = new THREE.Mesh(
+      createLanternGeometry(mobile ? 32 : 48),
+      new THREE.MeshBasicMaterial({ visible: false }),
+    )
     lanternGroup.add(rcMesh)
 
     const raycaster = new THREE.Raycaster()
@@ -340,11 +321,11 @@ export default function SignalLanternCanvas({ sectionRef }) {
     const hover = { point: new THREE.Vector3(), active: 0 }
     const localHover = new THREE.Vector3()
 
-    const params = {
-      hoverRadius: mobile ? 1.05 : 0.9,
-      liftDist: 0.34,
-      liftSpeedUp: 0.16,
-      liftSpeedDown: 0.055,
+    const fragParams = {
+      hoverRadius: mobile ? 0.95 : 0.75,
+      liftDist: 0.28,
+      liftSpeedUp: 0.15,
+      liftSpeedDown: 0.06,
     }
 
     let scrollP = 0
@@ -352,6 +333,7 @@ export default function SignalLanternCanvas({ sectionRef }) {
     let raf = 0
     let last = performance.now()
     let idleY = 0
+    let intro = 0
 
     const resize = () => {
       const w = Math.max(1, host.clientWidth)
@@ -361,6 +343,7 @@ export default function SignalLanternCanvas({ sectionRef }) {
       renderer.setSize(w, h, false)
       composer.setSize(w, h)
       bloomPass.setSize(w, h)
+      fxaaPass.uniforms.resolution.value.set(1 / w, 1 / h)
     }
 
     const updateScroll = () => {
@@ -392,34 +375,37 @@ export default function SignalLanternCanvas({ sectionRef }) {
       const dt = Math.min((now - last) / 1000, 0.05)
       last = now
 
-      smoothP += (scrollP - smoothP) * (1 - Math.exp(-dt * 3.2))
+      intro = Math.min(1, intro + dt / 2.4)
+      const easeIntro = 1 - Math.pow(1 - intro, 3)
+
+      smoothP += (scrollP - smoothP) * (1 - Math.exp(-dt * 2.2))
 
       const p = smoothP
       const stage = p * 2
       let px = 0
-      let py = 0.15
-      let rx = 0.12
-      let ry = 0
+      let py = THREE.MathUtils.lerp(-0.8, 0.1, easeIntro)
+      let rx = 0.15
+      let ry = THREE.MathUtils.lerp(Math.PI, 0, easeIntro)
       let rz = 0
+
       if (stage < 1) {
         const t = stage
-        px = THREE.MathUtils.lerp(0, -2.0, t)
-        py = THREE.MathUtils.lerp(0.15, 0.05, t)
-        rx = THREE.MathUtils.lerp(0.12, Math.PI * 0.28, t)
-        ry = THREE.MathUtils.lerp(0, -Math.PI * 0.45, t)
-        rz = THREE.MathUtils.lerp(0, Math.PI * 0.12, t)
+        px = THREE.MathUtils.lerp(0, -2.3, t)
+        rx = THREE.MathUtils.lerp(0.15, Math.PI * 0.5, t)
+        ry = THREE.MathUtils.lerp(ry, -Math.PI * 0.6, t)
+        rz = THREE.MathUtils.lerp(0, Math.PI * 0.25, t)
       } else {
         const t = stage - 1
-        px = THREE.MathUtils.lerp(-2.0, 2.0, t)
-        py = THREE.MathUtils.lerp(0.05, 0.1, t)
-        rx = THREE.MathUtils.lerp(Math.PI * 0.28, -Math.PI * 0.22, t)
-        ry = THREE.MathUtils.lerp(-Math.PI * 0.45, Math.PI * 0.45, t)
-        rz = THREE.MathUtils.lerp(Math.PI * 0.12, -Math.PI * 0.12, t)
+        px = THREE.MathUtils.lerp(-2.3, 2.3, t)
+        rx = THREE.MathUtils.lerp(Math.PI * 0.5, -Math.PI * 0.5, t)
+        ry = THREE.MathUtils.lerp(-Math.PI * 0.6, Math.PI * 0.6, t)
+        rz = THREE.MathUtils.lerp(Math.PI * 0.25, -Math.PI * 0.25, t)
       }
+
       scrollGroup.position.set(px, py, 0)
       scrollGroup.rotation.set(rx, ry, rz)
 
-      if (smoothP < 0.03) idleY += dt * 0.32
+      if (smoothP < 0.02 && intro >= 1) idleY += dt * ((Math.PI * 2) / 22)
       lanternGroup.rotation.y = idleY
 
       raycaster.setFromCamera(mouse, camera)
@@ -429,7 +415,7 @@ export default function SignalLanternCanvas({ sectionRef }) {
         hover.point.copy(localHover)
         hover.active = Math.min(hover.active + dt * 5, 1)
       } else {
-        hover.active = Math.max(hover.active - dt * 2.4, 0)
+        hover.active = Math.max(hover.active - dt * 2.5, 0)
       }
 
       for (const frag of fragments) {
@@ -437,38 +423,14 @@ export default function SignalLanternCanvas({ sectionRef }) {
         let target = 0
         if (hover.active > 0.01) {
           const dist = cellCenter.distanceTo(hover.point)
-          target = (1 - smoothstep(0.35, params.hoverRadius, dist)) * hover.active
+          target = (1 - smoothstep(0.4, fragParams.hoverRadius, dist)) * hover.active
         }
-        const speed = target > frag.userData.lift ? params.liftSpeedUp : params.liftSpeedDown
-        frag.userData.lift = THREE.MathUtils.lerp(
-          frag.userData.lift,
-          target,
-          1 - Math.exp(-speed * 60 * dt),
-        )
+        const speed = target > frag.userData.lift ? fragParams.liftSpeedUp : fragParams.liftSpeedDown
+        frag.userData.lift = THREE.MathUtils.lerp(frag.userData.lift, target, speed)
         const lift = frag.userData.lift
-        frag.position.copy(cellCenter).addScaledVector(cellNormal, 0.012 + lift * params.liftDist)
+        frag.position.copy(cellCenter).addScaledVector(cellNormal, 0.015 + lift * fragParams.liftDist)
         frag.quaternion.setFromAxisAngle(rotAxis, lift * maxAngle)
       }
-
-      const pulse = 0.5 + 0.5 * Math.sin(now * 0.0035)
-      const flicker = 0.5 + 0.5 * Math.sin(now * 0.011) * Math.sin(now * 0.007)
-      const glowAmt = 1 + hover.active * 0.85 + pulse * 0.2 + flicker * 0.15
-
-      flame.intensity = 3.8 * glowAmt
-      flameSoft.intensity = 1.8 * glowAmt
-      fragMat.emissiveIntensity = 0.95 + hover.active * 0.7 + pulse * 0.25 + flicker * 0.15
-
-      glowMat.opacity = 0.75 + hover.active * 0.25 + pulse * 0.12
-      glow.scale.setScalar(1.05 + hover.active * 0.35 + pulse * 0.08)
-      glow.scale.y = glow.scale.x * 1.45
-
-      haloMat.opacity = 0.22 + hover.active * 0.2 + pulse * 0.06
-      halo.scale.set(0.82 + hover.active * 0.12, 1.12 + hover.active * 0.15, 0.82 + hover.active * 0.12)
-
-      auraMat.opacity = 0.1 + hover.active * 0.16 + pulse * 0.04
-      aura.scale.set(0.88 + hover.active * 0.18, 1.18 + hover.active * 0.2, 0.88 + hover.active * 0.18)
-
-      bloomPass.strength = (mobile ? 1.05 : 1.55) + hover.active * 0.45 + pulse * 0.12
 
       composer.render()
     }
@@ -494,14 +456,11 @@ export default function SignalLanternCanvas({ sectionRef }) {
       fragMat.dispose()
       core.geometry.dispose()
       wireMaterial.dispose()
-      glow.geometry.dispose()
-      glowMat.dispose()
-      halo.geometry.dispose()
-      haloMat.dispose()
-      aura.geometry.dispose()
-      auraMat.dispose()
       rcMesh.geometry.dispose()
       rcMesh.material.dispose()
+      diffuse.dispose()
+      normalTex.dispose()
+      arm.dispose()
       composer.dispose()
       renderer.dispose()
     }

@@ -46,12 +46,12 @@ const stages = [
         to scale.
       </>
     ),
-    body: 'Hover the lantern to peel the shell and reveal the luminous wireframe within. Scroll to orbit through Meshkat’s world — connect, create, grow.',
+    body: 'Move your cursor across the lantern. Each fragment lifts on a hinge axis, exposing the luminous wireframe core — scroll to orbit through Meshkat’s world.',
     features: [
-      'Telecom platforms · VAS · messaging',
-      '360° digital & social marketing',
-      'Content systems for brand growth',
-      'Realtime creative experiences',
+      'Voronoi decomposition · GLSL + JS',
+      'Barycentric wireframe · UnrealBloom',
+      'PBR stone · normal + roughness maps',
+      'Realtime scroll orbit · spring peel',
     ],
   },
 ]
@@ -109,7 +109,7 @@ export default function SignalExperience({ children }) {
           <div className="signal-hud-corner signal-hud-tl" />
           <div className="signal-hud-corner signal-hud-br" />
           <p className={`signal-hint${showHint ? ' is-visible' : ''}`}>
-            ↑ hover the lantern to break it open ↑
+            ↑ hover the surface to interact ↑
           </p>
           <div className="signal-stage-dots">
             {stages.map((s, i) => (
