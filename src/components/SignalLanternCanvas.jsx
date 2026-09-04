@@ -100,11 +100,11 @@ function buildFragments(lanternGroup, mobile) {
   }
 
   const mat = new THREE.MeshStandardMaterial({
-    color: new THREE.Color(0x3a2414),
-    roughness: 0.82,
-    metalness: 0.08,
-    emissive: new THREE.Color(0xff6a1a),
-    emissiveIntensity: 0.22,
+    color: new THREE.Color(0xc45a18),
+    roughness: 0.55,
+    metalness: 0.05,
+    emissive: new THREE.Color(0xff7a1a),
+    emissiveIntensity: 1.15,
     side: THREE.DoubleSide,
   })
 
@@ -232,29 +232,32 @@ export default function SignalLanternCanvas({ sectionRef }) {
     })
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, mobile ? 1.25 : 1.75))
     renderer.toneMapping = THREE.ACESFilmicToneMapping
-    renderer.toneMappingExposure = 1.05
+    renderer.toneMappingExposure = 1.25
     renderer.outputColorSpace = THREE.SRGBColorSpace
 
     const composer = new EffectComposer(renderer)
     composer.addPass(new RenderPass(scene, camera))
     const bloomPass = new UnrealBloomPass(
       new THREE.Vector2(1, 1),
-      mobile ? 0.55 : 0.85,
-      0.42,
-      0.52,
+      mobile ? 1.15 : 1.65,
+      0.85,
+      0.12,
     )
     composer.addPass(bloomPass)
 
-    scene.add(new THREE.AmbientLight(0xffe8d0, 0.32))
-    const key = new THREE.DirectionalLight(0xffd8b0, 2.2)
+    scene.add(new THREE.AmbientLight(0xffc891, 0.22))
+    const key = new THREE.DirectionalLight(0xffe0b8, 1.4)
     key.position.set(3.2, 4.2, 5)
     scene.add(key)
-    const fill = new THREE.DirectionalLight(0x8899cc, 0.4)
+    const fill = new THREE.DirectionalLight(0x6a7a99, 0.25)
     fill.position.set(-4, -2, -3)
     scene.add(fill)
-    const flame = new THREE.PointLight(0xff6a1a, 2.2, 10, 1.4)
-    flame.position.set(0, 0.15, 0)
+    const flame = new THREE.PointLight(0xff7a1a, 4.5, 14, 1.1)
+    flame.position.set(0, 0.1, 0)
     lanternGroup.add(flame)
+    const flameSoft = new THREE.PointLight(0xffc060, 2.2, 8, 1.6)
+    flameSoft.position.set(0, -0.15, 0)
+    lanternGroup.add(flameSoft)
 
     const wireMaterial = new THREE.ShaderMaterial({
       vertexShader: `
@@ -273,9 +276,12 @@ export default function SignalLanternCanvas({ sectionRef }) {
           return 1.0 - min(a.x, min(a.y, a.z));
         }
         void main() {
-          float wf = wireMask(vBary, 1.55);
-          vec3 col = mix(vec3(0.06, 0.02, 0.0), vec3(1.0, 0.35, 0.06), wf);
-          col = mix(col, vec3(1.0, 0.75, 0.28) * 2.1, wf * 0.55);
+          float wf = wireMask(vBary, 1.35);
+          vec3 base = vec3(0.18, 0.04, 0.0);
+          vec3 edge = vec3(1.4, 0.45, 0.08);
+          vec3 hot = vec3(2.4, 1.35, 0.35);
+          vec3 col = mix(base, edge, wf);
+          col = mix(col, hot, wf * 0.7);
           gl_FragColor = vec4(col, 1.0);
         }
       `,
@@ -288,14 +294,40 @@ export default function SignalLanternCanvas({ sectionRef }) {
     lanternGroup.add(core)
 
     const glowMat = new THREE.MeshBasicMaterial({
+      color: 0xffb040,
+      transparent: true,
+      opacity: 0.95,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    })
+    const glow = new THREE.Mesh(new THREE.SphereGeometry(0.28, 28, 28), glowMat)
+    glow.position.y = 0.05
+    glow.scale.set(1, 1.45, 1)
+    lanternGroup.add(glow)
+
+    const haloMat = new THREE.MeshBasicMaterial({
+      color: 0xff6a14,
+      transparent: true,
+      opacity: 0.28,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    })
+    const halo = new THREE.Mesh(new THREE.SphereGeometry(1.05, 32, 32), haloMat)
+    halo.scale.set(0.85, 1.15, 0.85)
+    lanternGroup.add(halo)
+
+    const auraMat = new THREE.MeshBasicMaterial({
       color: 0xff8c28,
       transparent: true,
-      opacity: 0.55,
+      opacity: 0.14,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      side: THREE.DoubleSide,
     })
-    const glow = new THREE.Mesh(new THREE.SphereGeometry(0.22, 24, 24), glowMat)
-    glow.position.y = 0.05
-    glow.scale.set(1, 1.35, 1)
-    lanternGroup.add(glow)
+    const aura = new THREE.Mesh(new THREE.SphereGeometry(1.65, 32, 32), auraMat)
+    aura.scale.set(0.9, 1.2, 0.9)
+    lanternGroup.add(aura)
 
     const { list: fragments, mat: fragMat } = buildFragments(lanternGroup, mobile)
 
@@ -418,10 +450,25 @@ export default function SignalLanternCanvas({ sectionRef }) {
         frag.quaternion.setFromAxisAngle(rotAxis, lift * maxAngle)
       }
 
-      flame.intensity = 1.8 + hover.active * 1.4 + Math.sin(now * 0.003) * 0.25
-      glowMat.opacity = 0.4 + hover.active * 0.35 + Math.sin(now * 0.004) * 0.08
-      glow.scale.setScalar(1 + hover.active * 0.25 + Math.sin(now * 0.0035) * 0.06)
-      glow.scale.y = glow.scale.x * 1.35
+      const pulse = 0.5 + 0.5 * Math.sin(now * 0.0035)
+      const flicker = 0.5 + 0.5 * Math.sin(now * 0.011) * Math.sin(now * 0.007)
+      const glowAmt = 1 + hover.active * 0.85 + pulse * 0.2 + flicker * 0.15
+
+      flame.intensity = 3.8 * glowAmt
+      flameSoft.intensity = 1.8 * glowAmt
+      fragMat.emissiveIntensity = 0.95 + hover.active * 0.7 + pulse * 0.25 + flicker * 0.15
+
+      glowMat.opacity = 0.75 + hover.active * 0.25 + pulse * 0.12
+      glow.scale.setScalar(1.05 + hover.active * 0.35 + pulse * 0.08)
+      glow.scale.y = glow.scale.x * 1.45
+
+      haloMat.opacity = 0.22 + hover.active * 0.2 + pulse * 0.06
+      halo.scale.set(0.82 + hover.active * 0.12, 1.12 + hover.active * 0.15, 0.82 + hover.active * 0.12)
+
+      auraMat.opacity = 0.1 + hover.active * 0.16 + pulse * 0.04
+      aura.scale.set(0.88 + hover.active * 0.18, 1.18 + hover.active * 0.2, 0.88 + hover.active * 0.18)
+
+      bloomPass.strength = (mobile ? 1.05 : 1.55) + hover.active * 0.45 + pulse * 0.12
 
       composer.render()
     }
@@ -449,6 +496,10 @@ export default function SignalLanternCanvas({ sectionRef }) {
       wireMaterial.dispose()
       glow.geometry.dispose()
       glowMat.dispose()
+      halo.geometry.dispose()
+      haloMat.dispose()
+      aura.geometry.dispose()
+      auraMat.dispose()
       rcMesh.geometry.dispose()
       rcMesh.material.dispose()
       composer.dispose()
